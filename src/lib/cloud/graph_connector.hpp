@@ -376,10 +376,12 @@ struct graph_connector {
                 }
 
                 int compute_rank(device_t target_uid){
+                    /*
                     return node_splitter(
                         get_generator(has_randomizer<P>{}, *this),
                         fcpp::common::make_tagged_tuple<tags::uid, tags::MPI_procs>(target_uid, m_MPI_procs_count)
-                    );
+                    );*/
+                    return 0;
                 }
 
                 void add_to_map(int rank, device_t receiver_uid, times_t timestamp, typename F::node::message_t msg){
