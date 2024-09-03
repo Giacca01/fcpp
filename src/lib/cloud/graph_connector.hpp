@@ -102,7 +102,7 @@ struct graph_connector {
     using connection_data_type = common::tagged_tuple_t<>;
 
     //! @brief The type of node splitting functor
-    using node_splitting_type = common::option_type<tags::node_splitting, fcpp::common::option::functor::mod<real_t, real_t>, Ts...>;
+    using node_splitting_type = common::option_type<tags::node_splitting, functor::mod<real_t, real_t>, Ts...>;
 
     /**
      * @brief The actual component.
@@ -144,7 +144,7 @@ struct graph_connector {
                         node_ref->receive(timestamp, sender_uid, newMsg);
                     } else {
                         // receiver is a remote node: messages are added to communication map
-                        net_ref.add_to_map();
+                        net_ref.add_to_map(receiver_rank, node_ref->uid, timestamp, newMsg);
                     }
                 }
 
@@ -292,7 +292,7 @@ struct graph_connector {
                     for (std::pair<device_t, node_accessor> p : m_neighbours.first()) {
                         node_accessor n = p.second;
                         // TODO: questo va lasciato???
-                        common::lock_guard<parallel> l(n->mutex);
+                        common::lock_guard<parallel> l((n.get_node_ref())->mutex);
                         n.receive(t, P::node::uid, m);
                     }
                 } else P::node::update();
@@ -363,7 +363,8 @@ struct graph_connector {
                 explicit net(common::tagged_tuple<S,T> const& t) : 
                     P::net(t), 
                     m_threads(common::get_or<tags::threads>(t, FCPP_THREADS)),
-                    m_MPI_procs_count(common::get_or<tags::MPI_procs>(t)) {}
+                    m_MPI_procs_count(common::get_or<tags::MPI_procs>(t, 0)),
+                    node_splitter(get_generator(has_randomizer<P>{}, *this), t) {}
 
                 //! @brief Destructor ensuring that nodes are deleted first.
                 ~net() {
@@ -376,8 +377,8 @@ struct graph_connector {
 
                 int compute_rank(device_t target_uid){
                     return node_splitter(
-                        get_generator(),
-                        make_tuple(target_uid, m_MPI_procs_count)
+                        get_generator(has_randomizer<P>{}, *this),
+                        fcpp::common::make_tagged_tuple<tags::uid, tags::MPI_procs>(target_uid, m_MPI_procs_count)
                     );
                 }
 
