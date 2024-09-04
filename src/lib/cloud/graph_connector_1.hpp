@@ -23,6 +23,9 @@
 #include "lib/internal/twin.hpp"
 #include "lib/option/distribution.hpp"
 
+// Library to use mod functor
+#include "lib/option/functor.hpp"
+
 /**
  * @brief Namespace containing all the objects in the FCPP library.
  */
@@ -57,6 +60,13 @@ namespace tags {
 
     //! @brief Net initialisation tag associating to the number of threads that can be created.
     struct threads;
+
+    //! @brief Tag associated to remainder functor computation
+    template<typename A>
+    struct node_splitting;
+
+    //! @brief Tag associated to the number of MPI processes
+    struct MPI_procs;
 }
 
 /**
@@ -91,6 +101,9 @@ struct graph_connector {
     //! @brief The type of settings data regulating connection.
     using connection_data_type = common::tagged_tuple_t<>;
 
+    //! @brief The type of node splitting functor
+    using node_splitting_type = common::option_type<tags::node_splitting, functor::mod<real_t, real_t>, Ts...>;
+
     /**
      * @brief The actual component.
      *
@@ -107,6 +120,41 @@ struct graph_connector {
         REQUIRE_COMPONENT(connector,identifier);
         CHECK_COMPONENT(randomizer);
         //! @endcond
+
+        //! @brief Node wrapper that can distinguish between local and remote node
+        class node_accessor {
+            public:
+                //! @brief Constructor that initializes the node reference
+                node_accessor(typename F::node * newNode){
+                    node_ref = newNode;
+                }
+
+                //! @brief Message receipt method that handles the distinction between local and remote neighbour
+                void receive(times_t timestamp, device_t sender_uid, typename F::node::message_t newMsg){
+                    // Retrives net reference to access its methods
+                    typename F::net & net_ref = node_ref->net;
+
+                    // Computes the associated MPI process rank for both sender and receiver
+                    int sender_rank = net_ref.compute_rank(sender_uid);
+
+                    int receiver_rank = net_ref.compute_rank(node_ref->uid);
+
+                    // check whether nodes are handled by the same process
+                    if (sender_rank == receiver_rank){
+                        node_ref->receive(timestamp, sender_uid, newMsg);
+                    } else {
+                        // receiver is a remote node: messages are added to communication map
+                        net_ref.add_to_map(receiver_rank, node_ref->uid, timestamp, newMsg);
+                    }
+                }
+
+                //! @brief Get method to retrieve node reference
+                typename F::node * get_node_ref(){
+                    return node_ref;
+                }
+            private:
+                typename F::node * node_ref;
+        };
 
         //! @brief The local part of the component.
         class node : public P::node {
@@ -125,7 +173,7 @@ struct graph_connector {
                 while (m_neighbours.first().size() > 0) {
                     if (P::node::mutex.try_lock()) {
                         if (m_neighbours.first().size() > 0) {
-                            typename F::node* n = m_neighbours.first().begin()->second;
+                            typename F::node* n = (m_neighbours.first().begin()->second).get_node_ref();
                             if (n->mutex.try_lock()) {
                                 m_neighbours.first().erase(m_neighbours.first().begin());
                                 n->m_neighbours.second().erase(P::node::uid);
@@ -139,7 +187,7 @@ struct graph_connector {
                 while (m_neighbours.second().size() > 0) {
                     if (P::node::mutex.try_lock()) {
                         if (m_neighbours.second().size() > 0) {
-                            typename F::node* n = m_neighbours.second().begin()->second;
+                            typename F::node* n = (m_neighbours.second().begin()->second).get_node_ref();
                             if (n->mutex.try_lock()) {
                                 m_neighbours.second().erase(m_neighbours.second().begin());
                                 n->m_neighbours.first().erase(P::node::uid);
@@ -155,10 +203,10 @@ struct graph_connector {
             bool connect(device_t i) {
                 if (P::node::uid == i or m_neighbours.first().count(i) > 0) return false;
                 typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(i));
-                m_neighbours.first().emplace(n->uid, n);
+                m_neighbours.first().emplace(n->uid, node_accessor(n));
                 common::unlock_guard<parallel> u(P::node::mutex);
                 common::lock_guard<parallel> l(n->mutex);
-                n->m_neighbours.second().emplace(P::node::uid, &P::node::as_final());
+                n->m_neighbours.second().emplace(P::node::uid, node_accessor(&P::node::as_final()));
                 return true;
             }
 
@@ -241,10 +289,11 @@ struct graph_connector {
                     P::node::as_final().send(t, m);
                     P::node::as_final().receive(t, P::node::uid, m);
                     common::unlock_guard<parallel> u(P::node::mutex);
-                    for (std::pair<device_t, typename F::node*> p : m_neighbours.first()) {
-                        typename F::node* n = p.second;
-                        common::lock_guard<parallel> l(n->mutex);
-                        n->receive(t, P::node::uid, m);
+                    for (std::pair<device_t, node_accessor> p : m_neighbours.first()) {
+                        node_accessor n = p.second;
+                        // TODO: questo va lasciato???
+                        common::lock_guard<parallel> l((n.get_node_ref())->mutex);
+                        n.receive(t, P::node::uid, m);
                     }
                 } else P::node::update();
             }
@@ -265,7 +314,7 @@ struct graph_connector {
 
           private: // implementation details
             //! @brief Stores the list of neighbours in the graph.
-            using neighbour_list = std::unordered_map<device_t, typename F::node*>;
+            using neighbour_list = std::unordered_map<device_t, node_accessor>;
 
             //! @brief Stores size of received message (disabled).
             template <typename S, typename T>
@@ -308,22 +357,79 @@ struct graph_connector {
 
         //! @brief The global part of the component.
         class net : public P::net {
-          public: // visible by node objects and the main program
-            //! @brief Constructor from a tagged tuple.
-            template <typename S, typename T>
-            explicit net(common::tagged_tuple<S,T> const& t) : P::net(t), m_threads(common::get_or<tags::threads>(t, FCPP_THREADS)) {}
+            public: // visible by node objects and the main program
+                //! @brief Constructor from a tagged tuple.
+                template <typename S, typename T>
+                explicit net(common::tagged_tuple<S,T> const& t) : 
+                    P::net(t), 
+                    m_threads(common::get_or<tags::threads>(t, FCPP_THREADS)),
+                    m_MPI_procs_count(common::get_or<tags::MPI_procs>(t, 0)),
+                    node_splitter(get_generator(has_randomizer<P>{}, *this), t) {}
 
-            //! @brief Destructor ensuring that nodes are deleted first.
-            ~net() {
-                auto n_beg = P::net::node_begin();
-                auto n_end = P::net::node_end();
-                common::parallel_for(common::tags::general_execution<parallel>(m_threads), n_end-n_beg, [&] (size_t i, size_t) {
-                    n_beg[i].second.global_disconnect();
-                });
-            }
+                //! @brief Destructor ensuring that nodes are deleted first.
+                ~net() {
+                    auto n_beg = P::net::node_begin();
+                    auto n_end = P::net::node_end();
+                    common::parallel_for(common::tags::general_execution<parallel>(m_threads), n_end-n_beg, [&] (size_t i, size_t) {
+                        n_beg[i].second.global_disconnect();
+                    });
+
+                    if (!m_communication_maps.size())
+                        std::cout << "No messages exchanged" << std::endl;
+                    else {
+                        /*
+                        for (std::pair<const int, std::unordered_map<device_t, std::pair<times_t, typename F::node::message_t>>> messages_map : m_communication_maps){
+                            for (std::pair<const device_t, std::pair<times_t, typename F::node::message_t>> msg : messages_map){
+                                std::cout << "Message sent to node: " + std::to_string(msg.first) + " On process :" + std::to_string(messages_map.first) + " at time: " + std::to_string(msg.second.first) << std::endl;
+                            }
+                        }*/
+                        std::cout << "Messages have been exchanged" << std::endl;
+                    }
+                }
+
+                int compute_rank(device_t target_uid){
+                    /*
+                    return node_splitter(
+                        get_generator(has_randomizer<P>{}, *this),
+                        common::make_tagged_tuple<tags::uid, tags::MPI_procs>(target_uid, m_MPI_procs_count)
+                    );*/
+                    return 0;
+                }
+
+                void add_to_map(int rank, device_t receiver_uid, times_t timestamp, typename F::node::message_t msg){
+                    m_communication_maps[rank][receiver_uid] = std::make_pair(timestamp, msg);
+                }
 
             //! @brief The number of threads to be used.
             size_t const m_threads;
+
+            //! @brief Map that stores messages to be sent to remote nodes, located on another process
+            std::unordered_map<int, std::unordered_map<device_t, std::pair<times_t, typename F::node::message_t>>> m_communication_maps;
+
+            //! @brief Number of MPI processes
+            size_t m_MPI_procs_count;
+
+            //! @brief Functor to compute the MPI process associated to a node
+            node_splitting_type node_splitter;
+
+            private: // implementation details
+                //! @brief Returns the `randomizer` generator if available.
+                template <typename N>
+                inline auto& get_generator(std::true_type, N& n) {
+                    return n.generator();
+                }
+
+                //! @brief Returns a `crand` generator otherwise.
+                template <typename N>
+                inline crand get_generator(std::false_type, N&) {
+                    return {};
+                }
+
+                //! @brief Deletes all nodes if parent identifier.
+                template <typename N>
+                inline void maybe_clear(std::true_type, N& n) {
+                    return n.node_clear();
+                }
         };
     };
 };
