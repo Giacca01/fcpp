@@ -122,6 +122,7 @@ struct graph_spawner {
             //! @brief Constructor from a tagged tuple.
             template <typename S, typename T>
             explicit net(common::tagged_tuple<S,T> const& t) : P::net(t) {
+                std::cout << "Avvio costruttore" << std::endl;
                 read_nodes(
                     details::make_istream(common::get_or<tags::nodesinput>(t, "nodes")),
                     build_distributions(t, typename init_tuple_type::tags(), typename init_tuple_type::types()),
@@ -134,6 +135,7 @@ struct graph_spawner {
             //! @brief Reads node information from file and creates corresponding nodes.
             void read_nodes(std::shared_ptr<std::istream> is, init_tuple_type dist, times_t start) {
                 attributes_tuple_type row;
+                std::cout << "Inizio a leggere i nodi" << std::endl;
                 while (read_row(*is, row, typename attributes_tuple_type::tags{})) {
                     using res_type = std::result_of_t<init_tuple_type(crand, common::tagged_tuple_t<>)>;
                     using full_type = common::tagged_tuple_cat<attributes_tuple_type, res_type>;
@@ -141,6 +143,7 @@ struct graph_spawner {
                     call_distribution(dist, get_generator(has_randomizer<P>{}, *this), tt, typename init_tuple_type::tags{});
                     auto ttt = push_time(start, tt, typename full_type::tags::template intersect<tags::start>{});
                     device_t n = P::net::node_emplace(ttt);
+                    std::cout << "ID Nodo: " + std::to_string(n) << std::endl;
                 }
             }
 
@@ -152,6 +155,7 @@ struct graph_spawner {
             //! @brief Reads elements from a row of nodes file (non-empty overload).
             template <typename S, typename... Ss>
             inline bool read_row(std::istream& is, attributes_tuple_type& row, common::type_sequence<S, Ss...>) {
+
                 if (not (is >> common::get<S>(row))) {
                     assert(is.eof());
                     return false;
@@ -164,16 +168,20 @@ struct graph_spawner {
                 device_t d1, d2;
                 while (true) {
                     *is >> d1;
+                    std::cout << "Sorgente: " + std::to_string(d1) << std::endl;
+                    std::cout << "Fine: " + std::to_string(!*is) << std::endl;
                     if (!*is) {
                         assert(is->eof());
                         break;
                     }
                     *is >> d2;
+                    std::cout <<" Destinazione: " + std::to_string(d2) << std::endl;
                     assert(*is);
                     if (d1 != d2) {
                         typename net::lock_type l;
                         P::net::node_at(d1,l).connect(d2);
                     }
+                    std::fflush(stdout);
                 }
             }
 

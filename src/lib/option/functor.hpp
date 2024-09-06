@@ -231,7 +231,7 @@ struct mod {
     //! @brief Functor computation.
     template <typename G, typename T>
     type operator()(G&& g, T const& row) {
-        return m_a(g, row) % R(m_b(g, row));
+        return m_a(g, row) % m_b(g, row);
     }
 
   private:
