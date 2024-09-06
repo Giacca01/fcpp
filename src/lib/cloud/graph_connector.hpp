@@ -106,7 +106,7 @@ struct graph_connector {
     using connection_data_type = common::tagged_tuple_t<>;
 
     //! @brief The type of node splitting functor
-    using node_splitting_type = common::option_type<tags::node_splitting, functor::mod<device_t, int>, Ts...>;
+    using node_splitting_type = common::option_type<tags::node_splitting, functor::mod<tags::uid, tags::mpi_procs, size_t>, Ts...>;
 
     /**
      * @brief The actual component.
@@ -392,12 +392,12 @@ struct graph_connector {
                 }
 
                 int compute_rank(device_t target_uid){
-                    /*
+                    
                     return node_splitter(
                         get_generator(has_randomizer<P>{}, *this),
                         common::make_tagged_tuple<tags::uid, tags::mpi_procs>(target_uid, m_MPI_procs_count)
-                    );*/
-                    return target_uid % m_MPI_procs_count;
+                    );
+                    //return target_uid % m_MPI_procs_count;
                 }
 
                 void add_to_map(int rank, device_t receiver_uid, times_t timestamp, typename F::node::message_t msg){
