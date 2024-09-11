@@ -124,20 +124,22 @@ struct graph_spawner {
             //! @brief Constructor from a tagged tuple.
             template <typename S, typename T>
             explicit net(common::tagged_tuple<S,T> const& t) : P::net(t) {
-                std::cerr << "Avvio costruttore" << std::endl;
+                //std::cerr << "Avvio costruttore di net" << std::endl;
+                //std::cerr << "Nome file in tag: " + common::get_or<tags::nodesinput>(t, "nodes") << std::endl;
                 read_nodes(
                     details::make_istream(common::get_or<tags::nodesinput>(t, "nodes")),
                     build_distributions(t, typename init_tuple_type::tags(), typename init_tuple_type::types()),
                     common::get_or<tags::start>(t, 0)
                 );
                 read_arcs(details::make_istream(common::get_or<tags::arcsinput>(t, "arcs")));
+                std::cout << "Costruzione delle rete completata" << std::endl;
             }
 
           private: // implementation details
             //! @brief Reads node information from file and creates corresponding nodes.
             void read_nodes(std::shared_ptr<std::istream> is, init_tuple_type dist, times_t start) {
                 attributes_tuple_type row;
-                std::cerr << "Inizio a leggere i nodi" << std::endl;
+                //std::cerr << "Inizio a leggere i nodi" << std::endl;
 
                 int i = 0;
 
@@ -148,31 +150,28 @@ struct graph_spawner {
                     call_distribution(dist, get_generator(has_randomizer<P>{}, *this), tt, typename init_tuple_type::tags{});
                     auto ttt = push_time(start, tt, typename full_type::tags::template intersect<tags::start>{});
                     device_t n = P::net::node_emplace(ttt);
-                    std::cerr << "ID Nodo: " + std::to_string(n) << std::endl;
+                    std::cout << "ID Nodo Aggiunto: " + std::to_string(P::net::node_at(n).uid) << std::endl;
                 }
             }
 
             //! @brief Reads elements from a row of nodes file (empty overload).
             inline bool read_row(int i, std::istream&, attributes_tuple_type&, common::type_sequence<>) {
-                std::cerr << "Iterazione numero, caso base " << i << std::endl;
+                //std::cerr << "Iterazione numero, caso base " << i << std::endl;
                 return true;
             }
 
             //! @brief Reads elements from a row of nodes file (non-empty overload).
             template <typename S, typename... Ss>
             inline bool read_row(int i, std::istream& is, attributes_tuple_type& row, common::type_sequence<S, Ss...>) {
-                std::cerr << "Iterazione numero, caso induttivo " << i << std::endl;
-               
-               
-               
-               
-               std::cerr << "Tipo di row: " << typeid(attributes_tuple_type).name() << std::endl;
-               std::cerr << "Tipo di s: " << typeid(S).name() << std::endl;
+                //std::cerr << "Iterazione numero, caso induttivo " << i << std::endl;
+                
+                                
                 if (not (is >> common::get<S>(row))) {
                     
                     assert(is.eof());
                     return false;
                 }
+                
                 return read_row(i+1, is, row, common::type_sequence<Ss...>{});
             }
 
@@ -181,14 +180,14 @@ struct graph_spawner {
                 device_t d1, d2;
                 while (true) {
                     *is >> d1;
-                    std::cerr << "Sorgente: " + std::to_string(d1) << std::endl;
-                    std::cerr << "Fine: " + std::to_string(!*is) << std::endl;
+                    //std::cerr << "Sorgente: " + std::to_string(d1) << std::endl;
+                    //std::cerr << "Fine: " + std::to_string(!*is) << std::endl;
                     if (!*is) {
                         assert(is->eof());
                         break;
                     }
                     *is >> d2;
-                    std::cerr <<" Destinazione: " + std::to_string(d2) << std::endl;
+                    //std::cerr <<" Destinazione: " + std::to_string(d2) << std::endl;
                     assert(*is);
                     if (d1 != d2) {
                         typename net::lock_type l;

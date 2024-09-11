@@ -136,19 +136,22 @@ struct graph_connector {
                 //! @brief Message receipt method that handles the distinction between local and remote neighbour
                 void receive(times_t timestamp, device_t sender_uid, typename F::node::message_t newMsg){
                     // Retrives net reference to access its methods
-                    typename F::net & net_ref = node_ref->net;
+                    // oggetto net del vicino destinatario
+                    typename F::net & neigh_net_ref = node_ref->net;
 
                     // Computes the associated MPI process rank for both sender and receiver
-                    int sender_rank = net_ref.compute_rank(sender_uid);
+                    int sender_rank = P::net::compute_rank(sender_uid);
 
-                    int receiver_rank = net_ref.compute_rank(node_ref->uid);
+                    int receiver_rank = neigh_net_ref.compute_rank(node_ref->uid);
 
                     // check whether nodes are handled by the same process
                     if (sender_rank == receiver_rank){
+                        std::cerr << "Rango uguale" << std::endl;
                         node_ref->receive(timestamp, sender_uid, newMsg);
                     } else {
+                        std::cerr << "Rango diverso" << std::endl;
                         // receiver is a remote node: messages are added to communication map
-                        net_ref.add_to_map(receiver_rank, node_ref->uid, timestamp, newMsg);
+                        P::net::add_to_map(receiver_rank, node_ref->uid, timestamp, newMsg);
                     }
                 }
 
@@ -170,7 +173,8 @@ struct graph_connector {
              * @param t A `tagged_tuple` gathering initialisation values.
              */
             template <typename S, typename T>
-            node(typename F::net& n, common::tagged_tuple<S,T> const& t) : P::node(n,t), m_delay(get_generator(has_randomizer<P>{}, *this),t), m_send(TIME_MAX), m_nbr_msg_size(0) {}
+            node(typename F::net& n, common::tagged_tuple<S,T> const& t) : P::node(n,t), m_delay(get_generator(has_randomizer<P>{}, *this),t), m_send(TIME_MAX), m_nbr_msg_size(0) {
+            }
 
             //! @brief Destructor ensuring deadlock-free mutual disconnection.
             ~node() {
@@ -205,8 +209,13 @@ struct graph_connector {
 
             //! @brief Adds given device to neighbours (returns true on succeed).
             bool connect(device_t i) {
+                std::cout << "Id Sorgente: " + std::to_string(P::node::uid) << std::endl;
+                std::cout << "Id Destinazione: " + std::to_string(i) << std::endl;
                 if (P::node::uid == i or m_neighbours.first().count(i) > 0) return false;
+                
+                // sbagliato: nell'oggetto net del nodo corrente non c'è un riferimento ai nodi remoti
                 typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(i));
+                std::cout << "Connect lanciato" << std::endl;
                 m_neighbours.first().emplace(n->uid, node_accessor(n));
                 common::unlock_guard<parallel> u(P::node::mutex);
                 common::lock_guard<parallel> l(n->mutex);
@@ -216,6 +225,7 @@ struct graph_connector {
 
             //! @brief Removes given device from neighbours (returns true on succeed).
             bool disconnect(device_t i) {
+                std::cerr << "Disconnect lanciato" << std::endl;
                 if (P::node::uid == i or m_neighbours.first().count(i) == 0) return false;
                 typename F::node* n = m_neighbours.first().at(i);
                 m_neighbours.first().erase(i);
@@ -227,6 +237,7 @@ struct graph_connector {
 
             //! @brief Disconnects from every neighbour (should only be used on all neighbours at once).
             void global_disconnect() {
+                //std::cerr << "Global Disconnect lanciato" << std::endl;
                 return;
                 m_neighbours.first().clear();
                 if (not symmetric) m_neighbours.second().clear();
@@ -234,6 +245,7 @@ struct graph_connector {
 
             //! @brief Checks whether a given device identifier is within neighbours.
             bool connected(device_t i) const {
+                //std::cerr << "Connected lanciato" << std::endl;
                 return m_neighbours.first().count(i);
             }
 
@@ -278,6 +290,7 @@ struct graph_connector {
              * Should correspond to the next time also during updates.
              */
             times_t next() const {
+                //std::cerr << "Next lanciato" << std::endl;
                 return std::min(m_send, P::node::next());
             }
 
@@ -293,6 +306,7 @@ struct graph_connector {
                     P::node::as_final().send(t, m);
                     P::node::as_final().receive(t, P::node::uid, m);
                     common::unlock_guard<parallel> u(P::node::mutex);
+                    std::cout << "È stato lanciato un update" << std::endl;
                     for (std::pair<device_t, node_accessor> p : m_neighbours.first()) {
                         node_accessor n = p.second;
                         // TODO: questo va lasciato???
@@ -368,7 +382,9 @@ struct graph_connector {
                     P::net(t), 
                     m_threads(common::get_or<tags::threads>(t, FCPP_THREADS)),
                     m_MPI_procs_count(common::get<tags::mpi_procs>(t)),
-                    node_splitter(get_generator(has_randomizer<P>{}, *this), t){}
+                    node_splitter(get_generator(has_randomizer<P>{}, *this), t){
+                        std::cout << "Avviato il costruttore di NET" << std::endl;
+                    }
 
                 //! @brief Destructor ensuring that nodes are deleted first.
                 ~net() {
@@ -379,7 +395,7 @@ struct graph_connector {
                     });
 
                     if (!m_communication_maps.size())
-                        std::cout << "No messages exchanged" << std::endl;
+                        std::cerr << "No messages exchanged" << std::endl;
                     else {
                         /*
                         for (std::pair<const int, std::unordered_map<device_t, std::pair<times_t, typename F::node::message_t>>> messages_map : m_communication_maps){
@@ -387,7 +403,7 @@ struct graph_connector {
                                 std::cout << "Message sent to node: " + std::to_string(msg.first) + " On process :" + std::to_string(messages_map.first) + " at time: " + std::to_string(msg.second.first) << std::endl;
                             }
                         }*/
-                        std::cout << "Messages have been exchanged" << std::endl;
+                        std::cerr << "Messages have been exchanged" << std::endl;
                     }
                 }
 
@@ -401,6 +417,7 @@ struct graph_connector {
                 }
 
                 void add_to_map(int rank, device_t receiver_uid, times_t timestamp, typename F::node::message_t msg){
+                    std::cerr << "Messaggio aggiunto" << std::endl;
                     m_communication_maps[rank][receiver_uid] = std::make_pair(timestamp, msg);
                 }
 
