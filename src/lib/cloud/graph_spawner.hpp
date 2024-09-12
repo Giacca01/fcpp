@@ -132,7 +132,7 @@ struct graph_spawner {
                     common::get_or<tags::start>(t, 0)
                 );
                 read_arcs(details::make_istream(common::get_or<tags::arcsinput>(t, "arcs")));
-                std::cout << "Costruzione delle rete completata" << std::endl;
+                //std::cout << "Costruzione delle rete completata" << std::endl;
             }
 
           private: // implementation details
@@ -141,30 +141,25 @@ struct graph_spawner {
                 attributes_tuple_type row;
                 //std::cerr << "Inizio a leggere i nodi" << std::endl;
 
-                int i = 0;
-
-                while (read_row(i, *is, row, typename attributes_tuple_type::tags{})) { 
+                while (read_row(*is, row, typename attributes_tuple_type::tags{})) { 
                     using res_type = std::result_of_t<init_tuple_type(crand, common::tagged_tuple_t<>)>;
                     using full_type = common::tagged_tuple_cat<attributes_tuple_type, res_type>;
                     full_type tt = row;
                     call_distribution(dist, get_generator(has_randomizer<P>{}, *this), tt, typename init_tuple_type::tags{});
                     auto ttt = push_time(start, tt, typename full_type::tags::template intersect<tags::start>{});
                     device_t n = P::net::node_emplace(ttt);
-                    std::cout << "ID Nodo Aggiunto: " + std::to_string(P::net::node_at(n).uid) << std::endl;
+                    //std::cout << "ID Nodo Aggiunto: " + std::to_string(P::net::node_at(n).uid) << std::endl;
                 }
             }
 
             //! @brief Reads elements from a row of nodes file (empty overload).
-            inline bool read_row(int i, std::istream&, attributes_tuple_type&, common::type_sequence<>) {
-                //std::cerr << "Iterazione numero, caso base " << i << std::endl;
+            inline bool read_row(std::istream&, attributes_tuple_type&, common::type_sequence<>) {
                 return true;
             }
 
             //! @brief Reads elements from a row of nodes file (non-empty overload).
             template <typename S, typename... Ss>
-            inline bool read_row(int i, std::istream& is, attributes_tuple_type& row, common::type_sequence<S, Ss...>) {
-                //std::cerr << "Iterazione numero, caso induttivo " << i << std::endl;
-                
+            inline bool read_row(std::istream& is, attributes_tuple_type& row, common::type_sequence<S, Ss...>) {                
                                 
                 if (not (is >> common::get<S>(row))) {
                     
@@ -172,7 +167,7 @@ struct graph_spawner {
                     return false;
                 }
                 
-                return read_row(i+1, is, row, common::type_sequence<Ss...>{});
+                return read_row(is, row, common::type_sequence<Ss...>{});
             }
 
             //! @brief Reads arc information from file and creates corresponding connections.
@@ -180,20 +175,23 @@ struct graph_spawner {
                 device_t d1, d2;
                 while (true) {
                     *is >> d1;
-                    //std::cerr << "Sorgente: " + std::to_string(d1) << std::endl;
-                    //std::cerr << "Fine: " + std::to_string(!*is) << std::endl;
+                    std::cout << "Sorgente: " + std::to_string(d1) << std::endl;
                     if (!*is) {
                         assert(is->eof());
                         break;
                     }
                     *is >> d2;
-                    //std::cerr <<" Destinazione: " + std::to_string(d2) << std::endl;
+                    std::cout <<" Destinazione: " + std::to_string(d2) << std::endl;
                     assert(*is);
                     if (d1 != d2) {
+                        // le sorgenti, recuperate con node_at, sono soltanto
+                        // nodi locali, quindi questo non dovrebbe andare in errore
+                        // quindi la connect si fa comunque, però va modificata in modo che
+                        // non vada in errore
                         typename net::lock_type l;
                         P::net::node_at(d1,l).connect(d2);
                     }
-                    std::fflush(stdout);
+                    //std::cout << "read_arcs eseguita correttamente" << std::endl;
                 }
             }
 
