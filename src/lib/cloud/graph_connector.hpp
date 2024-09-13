@@ -140,6 +140,8 @@ struct graph_connector {
                     // nel caso in cui si trovino su processi MPI diversi
 
                     // Computes the associated MPI process rank for both sender and receiver
+                    // qui si può usare lo stesso oggetto di rete, anche per il nodo remoto
+                    // perchè tanto la regola di calcolo non usa dati della rete
                     int sender_rank = loc_net_ref.compute_rank(sender_uid);
 
                     int receiver_rank = loc_net_ref.compute_rank(ref_uid);
@@ -148,12 +150,16 @@ struct graph_connector {
                     std::cout << "Sender UID: " + std::to_string(sender_uid) << std::endl;
                     std::cout << "Receiver UID: " + std::to_string(ref_uid) << std::endl;
                     if (sender_rank == receiver_rank){
-                        //std::cout << "Rango uguale" << std::endl;
+                        std::cout << "Rango uguale" << std::endl;
                         // devo recuperarmi il riferimento al nodo tramite uid
-                        node_at(ref_uid)->receive(timestamp, sender_uid, newMsg);
+                        typename F::node* n = const_cast<typename F::node*>(&loc_net_ref.node_at(ref_uid));
+                        n->receive(timestamp, sender_uid, newMsg);
                     } else {
-                        //std::cout << "Rango diverso" << std::endl;
+                        std::cout << "Rango diverso" << std::endl;
                         // receiver is a remote node: messages are added to communication map
+                        // questo è l'oggetto rete del mittente: è giusto che i messaggi
+                        // da lui generati ed indirizzati a nodi remoti vengano memorizzati
+                        // nella sua mappa
                         loc_net_ref.add_to_map(receiver_rank, ref_uid, timestamp, newMsg);
                     }
                     //std::cout << "Receive eseguita correttamente" << std::endl;
@@ -182,15 +188,22 @@ struct graph_connector {
 
             //! @brief Destructor ensuring deadlock-free mutual disconnection.
             ~node() {
+                int sender_rank = P::node::net.compute_rank(P::node::uid);
+                int receiver_rank;
                 while (m_neighbours.first().size() > 0) {
                     if (P::node::mutex.try_lock()) {
                         if (m_neighbours.first().size() > 0) {
-                            typename F::node* n = (m_neighbours.first().begin()->second).get_node_ref();
-                            if (n->mutex.try_lock()) {
-                                m_neighbours.first().erase(m_neighbours.first().begin());
-                                n->m_neighbours.second().erase(P::node::uid);
-                                n->mutex.unlock();
-                            }
+                            device_t node_uid = (m_neighbours.first().begin()->second).get_node_ref();
+                            receiver_rank = P::node::net.compute_rank(node_uid);
+                            /*if (sender_rank == receiver_rank){
+                                typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(node_uid));
+                                if (n->mutex.try_lock()) {
+                                    m_neighbours.first().erase(m_neighbours.first().begin());
+                                    n->m_neighbours.second().erase(P::node::uid);
+                                    n->mutex.unlock();
+                                }
+                            }*/
+                            m_neighbours.first().erase(m_neighbours.first().begin());
                         }
                         P::node::mutex.unlock();
                     }
@@ -199,12 +212,18 @@ struct graph_connector {
                 while (m_neighbours.second().size() > 0) {
                     if (P::node::mutex.try_lock()) {
                         if (m_neighbours.second().size() > 0) {
-                            typename F::node* n = (m_neighbours.second().begin()->second).get_node_ref();
-                            if (n->mutex.try_lock()) {
-                                m_neighbours.second().erase(m_neighbours.second().begin());
-                                n->m_neighbours.first().erase(P::node::uid);
-                                n->mutex.unlock();
-                            }
+                            device_t node_uid = (m_neighbours.second().begin()->second).get_node_ref();
+                            receiver_rank = P::node::net.compute_rank(node_uid);
+                            /*
+                            if (sender_rank == receiver_rank){
+                                typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(node_uid));
+                                if (n->mutex.try_lock()) {
+                                    m_neighbours.second().erase(m_neighbours.second().begin());
+                                    n->m_neighbours.first().erase(P::node::uid);
+                                    n->mutex.unlock();
+                                }
+                            }*/
+                            m_neighbours.second().erase(m_neighbours.second().begin());
                         }
                         P::node::mutex.unlock();
                     }
@@ -218,26 +237,42 @@ struct graph_connector {
                 //std::cout << "Id Destinazione: " + std::to_string(i) << std::endl;
                 if (P::node::uid == i or m_neighbours.first().count(i) > 0) return false;
                 
-                // sbagliato: nell'oggetto net del nodo corrente non c'è un riferimento ai nodi remoti
-                
-                //typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(i));
-                //std::cout << "Connect lanciato" << std::endl;
+                //int sender_rank = P::node::net.compute_rank(P::node::uid);
+                int sender_rank = P::node::uid % 2;
+                //int receiver_rank = P::node::net.compute_rank(i);                
+                int receiver_rank = i % 2;                
+
                 m_neighbours.first().emplace(i, node_accessor(i));
                 common::unlock_guard<parallel> u(P::node::mutex);
-                //common::lock_guard<parallel> l(n->mutex);
-                //n->m_neighbours.second().emplace(P::node::uid, node_accessor(&P::node::as_final()));
+                /*
+                if (sender_rank == receiver_rank){
+                    // vicino locale: la connessione deve essere standard, in due sensi
+                    typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(i));
+                    common::lock_guard<parallel> l(n->mutex);
+                    n->m_neighbours.second().emplace(P::node::uid, node_accessor(P::node::uid));
+                }*/
+                
                 return true;
             }
 
             //! @brief Removes given device from neighbours (returns true on succeed).
             bool disconnect(device_t i) {
-                std::cerr << "Disconnect lanciato" << std::endl;
+                int sender_rank = P::node::uid % 2;
+                //int sender_rank = P::node::net.compute_rank(P::node::uid);
+                int receiver_rank = i % 2;  
+                //int receiver_rank = P::node::net.compute_rank(i);   
+
                 if (P::node::uid == i or m_neighbours.first().count(i) == 0) return false;
-                //typename F::node* n = m_neighbours.first().at(i);
+
                 m_neighbours.first().erase(i);
                 common::unlock_guard<parallel> u(P::node::mutex);
-                //common::lock_guard<parallel> l(n->mutex);
-                //n->m_neighbours.second().erase(P::node::uid);
+                /*
+                if (sender_rank == receiver_rank){
+                    typename F::node* n = m_neighbours.first().at(i);
+                    common::lock_guard<parallel> l(n->mutex);
+                    n->m_neighbours.second().erase(P::node::uid);
+                }*/
+                
                 return true;
             }
 
@@ -389,7 +424,8 @@ struct graph_connector {
                     m_threads(common::get_or<tags::threads>(t, FCPP_THREADS)),
                     m_MPI_procs_count(common::get<tags::mpi_procs>(t)),
                     node_splitter(get_generator(has_randomizer<P>{}, *this), t){
-                        //std::cout << "Avviato il costruttore di NET" << std::endl;
+                        std::cout << "Avviato il costruttore di NET" << std::endl;
+                        std::cout << "Numero processi: " + std::to_string(m_MPI_procs_count) << std::endl;
                     }
 
                 //! @brief Destructor ensuring that nodes are deleted first.
@@ -403,18 +439,18 @@ struct graph_connector {
                     if (!m_communication_maps.size())
                         std::cout << "No messages exchanged" << std::endl;
                     else {
-                        /*
                         for (std::pair<const int, std::unordered_map<device_t, std::pair<times_t, typename F::node::message_t>>> messages_map : m_communication_maps){
-                            for (std::pair<const device_t, std::pair<times_t, typename F::node::message_t>> msg : messages_map){
-                                std::cout << "Message sent to node: " + std::to_string(msg.first) + " On process :" + std::to_string(messages_map.first) + " at time: " + std::to_string(msg.second.first) << std::endl;
+                            for (std::pair<const device_t, std::pair<times_t, typename F::node::message_t>> msg : messages_map.second){
+                                std::cout << "Message sent to node: " + std::to_string(msg.first) + " On process: " + std::to_string(messages_map.first) + " at time: " + std::to_string(msg.second.first) << std::endl;
                             }
-                        }*/
+                        }
                         std::cout << "Messages have been exchanged" << std::endl;
                     }
                 }
 
                 int compute_rank(device_t target_uid){
-                    
+                    //std::cout << "UID target: " + std::to_string(target_uid) << std::endl;
+                    //std::cout << "Numero processi " + std::to_string(m_MPI_procs_count) << std::endl;
                     return node_splitter(
                         get_generator(has_randomizer<P>{}, *this),
                         common::make_tagged_tuple<tags::uid, tags::mpi_procs>(target_uid, m_MPI_procs_count)
