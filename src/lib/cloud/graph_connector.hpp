@@ -153,6 +153,7 @@ struct graph_connector {
                         std::cout << "Rango uguale" << std::endl;
                         // devo recuperarmi il riferimento al nodo tramite uid
                         typename F::node* n = const_cast<typename F::node*>(&loc_net_ref.node_at(ref_uid));
+                        common::lock_guard<parallel> l(n->mutex);
                         n->receive(timestamp, sender_uid, newMsg);
                     } else {
                         std::cout << "Rango diverso" << std::endl;
@@ -195,14 +196,14 @@ struct graph_connector {
                         if (m_neighbours.first().size() > 0) {
                             device_t node_uid = (m_neighbours.first().begin()->second).get_node_ref();
                             receiver_rank = P::node::net.compute_rank(node_uid);
-                            /*if (sender_rank == receiver_rank){
+                            if (sender_rank == receiver_rank){
                                 typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(node_uid));
                                 if (n->mutex.try_lock()) {
                                     m_neighbours.first().erase(m_neighbours.first().begin());
                                     n->m_neighbours.second().erase(P::node::uid);
                                     n->mutex.unlock();
                                 }
-                            }*/
+                            }
                             m_neighbours.first().erase(m_neighbours.first().begin());
                         }
                         P::node::mutex.unlock();
@@ -214,7 +215,6 @@ struct graph_connector {
                         if (m_neighbours.second().size() > 0) {
                             device_t node_uid = (m_neighbours.second().begin()->second).get_node_ref();
                             receiver_rank = P::node::net.compute_rank(node_uid);
-                            /*
                             if (sender_rank == receiver_rank){
                                 typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(node_uid));
                                 if (n->mutex.try_lock()) {
@@ -222,7 +222,7 @@ struct graph_connector {
                                     n->m_neighbours.first().erase(P::node::uid);
                                     n->mutex.unlock();
                                 }
-                            }*/
+                            }
                             m_neighbours.second().erase(m_neighbours.second().begin());
                         }
                         P::node::mutex.unlock();
@@ -244,13 +244,12 @@ struct graph_connector {
 
                 m_neighbours.first().emplace(i, node_accessor(i));
                 common::unlock_guard<parallel> u(P::node::mutex);
-                /*
                 if (sender_rank == receiver_rank){
                     // vicino locale: la connessione deve essere standard, in due sensi
                     typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(i));
                     common::lock_guard<parallel> l(n->mutex);
                     n->m_neighbours.second().emplace(P::node::uid, node_accessor(P::node::uid));
-                }*/
+                }
                 
                 return true;
             }
@@ -266,12 +265,12 @@ struct graph_connector {
 
                 m_neighbours.first().erase(i);
                 common::unlock_guard<parallel> u(P::node::mutex);
-                /*
+                
                 if (sender_rank == receiver_rank){
                     typename F::node* n = m_neighbours.first().at(i);
                     common::lock_guard<parallel> l(n->mutex);
                     n->m_neighbours.second().erase(P::node::uid);
-                }*/
+                }
                 
                 return true;
             }
@@ -350,8 +349,6 @@ struct graph_connector {
                     //std::cout << "È stato lanciato un update" << std::endl;
                     for (std::pair<device_t, node_accessor> p : m_neighbours.first()) {
                         node_accessor n = p.second;
-                        // TODO: questo va lasciato???
-                        //common::lock_guard<parallel> l((n.get_node_ref())->mutex);
                         n.receive(P::node::net, t, P::node::uid, m);
                     }
                 } else P::node::update();
@@ -446,6 +443,9 @@ struct graph_connector {
                         }
                         std::cout << "Messages have been exchanged" << std::endl;
                     }
+
+                    // qui va aggiunta la release del lock della mappa globale
+                    common::unlock_guard<parallel> u(comm_map_mutex);
                 }
 
                 int compute_rank(device_t target_uid){
@@ -460,6 +460,7 @@ struct graph_connector {
 
                 void add_to_map(int rank, device_t receiver_uid, times_t timestamp, typename F::node::message_t msg){
                     std::cout << "Messaggio aggiunto" << std::endl;
+                    common::lock_guard<parallel> l(comm_map_mutex);
                     m_communication_maps[rank][receiver_uid] = std::make_pair(timestamp, msg);
                 }
 
@@ -474,6 +475,9 @@ struct graph_connector {
 
             //! @brief Functor to compute the MPI process associated to a node
             node_splitting_type node_splitter;
+
+            //! @brief Mutex to manage parallel access to messages map
+            common::mutex<parallel> comm_map_mutex;
 
             private: // implementation details
                 //! @brief Returns the `randomizer` generator if available.
