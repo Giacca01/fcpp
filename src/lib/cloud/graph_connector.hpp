@@ -61,14 +61,14 @@ namespace tags {
     //! @brief Net initialisation tag associating to the number of threads that can be created.
     struct threads;
 
-    //! @brief Tag associated to remainder functor computation
+    //! @brief Tag associated to graph partitioning functor
     template<typename A>
     struct node_splitting;
 
     //! @brief Tag associated to the number of MPI processes
     struct mpi_procs{};
 
-    //! @brief Node initialisation tag associating to a `device_t` unique identifier (required).
+    //! @brief Node initialisation tag associating to a `device_t` unique identifier.
     struct uid;
 }
 
@@ -136,34 +136,21 @@ struct graph_connector {
                 //! @brief Message receipt method that handles the distinction between local and remote neighbour
                 void receive(typename F::net & loc_net_ref, times_t timestamp, device_t sender_uid, typename F::node::message_t newMsg){
                     // Retrives net reference to access its methods
-                    // oggetto net del vicino destinatario, non si può usare per conti che riguardano il mittente
-                    // nel caso in cui si trovino su processi MPI diversi
 
                     // Computes the associated MPI process rank for both sender and receiver
-                    // qui si può usare lo stesso oggetto di rete, anche per il nodo remoto
-                    // perchè tanto la regola di calcolo non usa dati della rete
                     int sender_rank = loc_net_ref.compute_rank(sender_uid);
-
                     int receiver_rank = loc_net_ref.compute_rank(ref_uid);
 
                     // check whether nodes are handled by the same process
-                    std::cout << "Sender UID: " + std::to_string(sender_uid) << std::endl;
-                    std::cout << "Receiver UID: " + std::to_string(ref_uid) << std::endl;
                     if (sender_rank == receiver_rank){
-                        std::cout << "Rango uguale" << std::endl;
-                        // devo recuperarmi il riferimento al nodo tramite uid
+                        // Retriving the reference to the neighbour via uid
                         typename F::node* n = const_cast<typename F::node*>(&loc_net_ref.node_at(ref_uid));
                         common::lock_guard<parallel> l(n->mutex);
                         n->receive(timestamp, sender_uid, newMsg);
                     } else {
-                        std::cout << "Rango diverso" << std::endl;
                         // receiver is a remote node: messages are added to communication map
-                        // questo è l'oggetto rete del mittente: è giusto che i messaggi
-                        // da lui generati ed indirizzati a nodi remoti vengano memorizzati
-                        // nella sua mappa
                         loc_net_ref.add_to_map(receiver_rank, ref_uid, timestamp, newMsg);
                     }
-                    //std::cout << "Receive eseguita correttamente" << std::endl;
                 }
 
                 //! @brief Get method to retrieve node reference
@@ -191,15 +178,16 @@ struct graph_connector {
             ~node() {
                 int sender_rank = P::node::net.compute_rank(P::node::uid);
                 int receiver_rank;
+
                 while (m_neighbours.first().size() > 0) {
                     if (P::node::mutex.try_lock()) {
                         if (m_neighbours.first().size() > 0) {
                             device_t node_uid = (m_neighbours.first().begin()->second).get_node_ref();
                             receiver_rank = P::node::net.compute_rank(node_uid);
+                            // if the two nodes are on the same MPI process, a physical arc must be removed
                             if (sender_rank == receiver_rank){
                                 typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(node_uid));
                                 if (n->mutex.try_lock()) {
-                                    m_neighbours.first().erase(m_neighbours.first().begin());
                                     n->m_neighbours.second().erase(P::node::uid);
                                     n->mutex.unlock();
                                 }
@@ -218,7 +206,6 @@ struct graph_connector {
                             if (sender_rank == receiver_rank){
                                 typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(node_uid));
                                 if (n->mutex.try_lock()) {
-                                    m_neighbours.second().erase(m_neighbours.second().begin());
                                     n->m_neighbours.first().erase(P::node::uid);
                                     n->mutex.unlock();
                                 }
@@ -228,15 +215,14 @@ struct graph_connector {
                         P::node::mutex.unlock();
                     }
                 }
-                
             }
 
             //! @brief Adds given device to neighbours (returns true on succeed).
             bool connect(device_t i) {
-                //std::cout << "Id Sorgente: " + std::to_string(P::node::uid) << std::endl;
-                //std::cout << "Id Destinazione: " + std::to_string(i) << std::endl;
                 if (P::node::uid == i or m_neighbours.first().count(i) > 0) return false;
                 
+                // Attualmente questa istruzione non funziona, perchè in questo punto net
+                // non è ancora inizializzato
                 //int sender_rank = P::node::net.compute_rank(P::node::uid);
                 int sender_rank = P::node::uid % 2;
                 //int receiver_rank = P::node::net.compute_rank(i);                
@@ -245,7 +231,7 @@ struct graph_connector {
                 m_neighbours.first().emplace(i, node_accessor(i));
                 common::unlock_guard<parallel> u(P::node::mutex);
                 if (sender_rank == receiver_rank){
-                    // vicino locale: la connessione deve essere standard, in due sensi
+                    // local neigbour: setting up a standard connection
                     typename F::node* n = const_cast<typename F::node*>(&P::node::net.node_at(i));
                     common::lock_guard<parallel> l(n->mutex);
                     n->m_neighbours.second().emplace(P::node::uid, node_accessor(P::node::uid));
@@ -267,6 +253,8 @@ struct graph_connector {
                 common::unlock_guard<parallel> u(P::node::mutex);
                 
                 if (sender_rank == receiver_rank){
+                    // physical connection: there is another arc that must be removed
+                    // in a deadlock-free way
                     typename F::node* n = m_neighbours.first().at(i);
                     common::lock_guard<parallel> l(n->mutex);
                     n->m_neighbours.second().erase(P::node::uid);
@@ -277,7 +265,6 @@ struct graph_connector {
 
             //! @brief Disconnects from every neighbour (should only be used on all neighbours at once).
             void global_disconnect() {
-                //std::cerr << "Global Disconnect lanciato" << std::endl;
                 return;
                 m_neighbours.first().clear();
                 if (not symmetric) m_neighbours.second().clear();
@@ -285,7 +272,6 @@ struct graph_connector {
 
             //! @brief Checks whether a given device identifier is within neighbours.
             bool connected(device_t i) const {
-                //std::cerr << "Connected lanciato" << std::endl;
                 return m_neighbours.first().count(i);
             }
 
@@ -330,7 +316,6 @@ struct graph_connector {
              * Should correspond to the next time also during updates.
              */
             times_t next() const {
-                //std::cerr << "Next lanciato" << std::endl;
                 return std::min(m_send, P::node::next());
             }
 
@@ -346,7 +331,6 @@ struct graph_connector {
                     P::node::as_final().send(t, m);
                     P::node::as_final().receive(t, P::node::uid, m);
                     common::unlock_guard<parallel> u(P::node::mutex);
-                    //std::cout << "È stato lanciato un update" << std::endl;
                     for (std::pair<device_t, node_accessor> p : m_neighbours.first()) {
                         node_accessor n = p.second;
                         n.receive(P::node::net, t, P::node::uid, m);
@@ -420,10 +404,7 @@ struct graph_connector {
                     P::net(t), 
                     m_threads(common::get_or<tags::threads>(t, FCPP_THREADS)),
                     m_MPI_procs_count(common::get<tags::mpi_procs>(t)),
-                    node_splitter(get_generator(has_randomizer<P>{}, *this), t){
-                        std::cout << "Avviato il costruttore di NET" << std::endl;
-                        std::cout << "Numero processi: " + std::to_string(m_MPI_procs_count) << std::endl;
-                    }
+                    node_splitter(get_generator(has_randomizer<P>{}, *this), t){}
 
                 //! @brief Destructor ensuring that nodes are deleted first.
                 ~net() {
@@ -436,30 +417,26 @@ struct graph_connector {
                     if (!m_communication_maps.size())
                         std::cout << "No messages exchanged" << std::endl;
                     else {
+                        std::cout << "Messages have been exchanged" << std::endl;
                         for (std::pair<const int, std::unordered_map<device_t, std::pair<times_t, typename F::node::message_t>>> messages_map : m_communication_maps){
                             for (std::pair<const device_t, std::pair<times_t, typename F::node::message_t>> msg : messages_map.second){
                                 std::cout << "Message sent to node: " + std::to_string(msg.first) + " On process: " + std::to_string(messages_map.first) + " at time: " + std::to_string(msg.second.first) << std::endl;
                             }
                         }
-                        std::cout << "Messages have been exchanged" << std::endl;
                     }
 
-                    // qui va aggiunta la release del lock della mappa globale
+                    // releasing the lock that protects the remote messages map
                     common::unlock_guard<parallel> u(comm_map_mutex);
                 }
 
                 int compute_rank(device_t target_uid){
-                    //std::cout << "UID target: " + std::to_string(target_uid) << std::endl;
-                    //std::cout << "Numero processi " + std::to_string(m_MPI_procs_count) << std::endl;
                     return node_splitter(
                         get_generator(has_randomizer<P>{}, *this),
                         common::make_tagged_tuple<tags::uid, tags::mpi_procs>(target_uid, m_MPI_procs_count)
                     );
-                    //return target_uid % m_MPI_procs_count;
                 }
 
                 void add_to_map(int rank, device_t receiver_uid, times_t timestamp, typename F::node::message_t msg){
-                    std::cout << "Messaggio aggiunto" << std::endl;
                     common::lock_guard<parallel> l(comm_map_mutex);
                     m_communication_maps[rank][receiver_uid] = std::make_pair(timestamp, msg);
                 }
