@@ -491,10 +491,11 @@ struct graph_connector {
                             std::cerr << "Sending remote message to process: " << messages_map.first << std::endl;
                             os << messages_map.second;
                             snd_buffer_size = os.size();
+                            std::vector<char> m_data = std::move(os.data());
                             // 0 for a size message, 1 for a data message
                             MPI_Send(&snd_buffer_size, 1, MPI_INT, messages_map.first, 0, MPI_COMM_WORLD);
                             // move dovrebbe evitare di fare una copia dei dati, operazione molto costosa
-                            MPI_Send(std::move(os), os.size(), MPI_CHAR, messages_map.first, 1, MPI_COMM_WORLD);
+                            MPI_Send(&m_data[0], snd_buffer_size, MPI_CHAR, messages_map.first, 1, MPI_COMM_WORLD);
                         }
 
                         // receiving messages from remote node using MPI_receive
@@ -514,16 +515,17 @@ struct graph_connector {
                                 std::cerr << "Receiving remote message from process: " << rank << std::endl;
                                 MPI_Recv(&rcv_buffer_size, 1, MPI_INT, rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                                 // TODO: si può rendere più efficiente evitando di riallocare ogni volta?
-                                char * rcv_buffer = new char[rcv_buffer_size];
+                                std::vector<char>rcv_buffer(rcv_buffer_size);
                                 // qui bisogna fare un loop per considerare ogni rango
                                 // per ciascuno, assicurarsi che la computazione non si blocchi se non ci sono messaggi
-                                MPI_Recv(rcv_buffer, rcv_buffer_size, MPI_CHAR, rank, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                                MPI_Recv(&rcv_buffer[0], rcv_buffer_size, MPI_CHAR, rank, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                                //common::isstream is(std::move(rcv_buffer));
                                 common::isstream is(std::move(rcv_buffer));
-                                std::unordered_map<device_t, std::pair<times_t, typename F::node::message_t>> incoming_msg_map;
+                                std::unordered_map<device_t, std::tuple<times_t, typename F::node::message_t, device_t>> incoming_msg_map;
                                 is >> incoming_msg_map;
 
                                 // ora scansiono la mappa, smistando i messaggi ai destinatari
-                                for (std::pair<const device_t, std::tuple<times_t, typename F::node::message_t, device_t>> msg : incoming_msg_map.second){
+                                for (std::pair<const device_t, std::tuple<times_t, typename F::node::message_t, device_t>> msg : incoming_msg_map){
                                     std::cerr << "Sending message to local node " << msg.first << std::endl;
                                     // recupero il puntatore a nodo
                                     typename F::node* n = const_cast<typename F::node*>(&P::net.node_at(msg.first));
