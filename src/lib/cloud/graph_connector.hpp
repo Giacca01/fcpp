@@ -22,6 +22,7 @@
 #include "lib/data/field.hpp"
 #include "lib/internal/twin.hpp"
 #include "lib/option/distribution.hpp"
+#include "lib/option/sequence.hpp"
 #include <mpi.h>
 
 // Library to use mod functor
@@ -72,9 +73,13 @@ namespace tags {
     //! @brief Node initialisation tag associating to a `device_t` unique identifier.
     struct uid;
 
-    //! @brief Period between successive invocations of the node update method
+    //! @brief Period between successive invocations of the send in the node update method
     template <typename T>
-    struct MPI_schedule{};
+    struct mpi_send_schedule{};
+
+    //! @brief Period between successive invocations of the receive in the node update method
+    template <typename T>
+    struct mpi_recv_schedule{};
 }
 
 /**
@@ -113,8 +118,11 @@ struct graph_connector {
     //! @brief The type of node splitting functor
     using node_splitting_type = common::option_type<tags::node_splitting, functor::mod<tags::uid, tags::mpi_procs, size_t>, Ts...>;
 
-    //! @brief Type of delay between successive invocation of the update method
-    using schedule_type = common::option_type<tags::MPI_schedule, distribution::constant_n<times_t, 50>, Ts...>;
+    //! @brief Type of delay between successive invocation of the update method to send messages
+    using mpi_send_schedule_type = common::option_type<tags::mpi_send_schedule, sequence::never, Ts...>;
+
+    //! @brief Type of delay between successive invocation of the update method to receive messages
+    using mpi_recv_schedule_type = common::option_type<tags::mpi_recv_schedule, sequence::never, Ts...>;
 
     /**
      * @brief The actual component.
@@ -331,11 +339,8 @@ struct graph_connector {
 
             //! @brief Updates the internal status of node component.
             void update() {
-                std::cout << "Node updated launched" << std::endl;
                 times_t t = m_send;
                 times_t pt = P::node::next();
-                std::cout << "t: " << t << std::endl;
-                std::cout << "pt: " << pt << std::endl;
                 if (t < pt) {
                     PROFILE_COUNT("graph_connector");
                     PROFILE_COUNT("graph_connector/send");
@@ -416,7 +421,8 @@ struct graph_connector {
                 template <typename S, typename T>
                 explicit net(common::tagged_tuple<S,T> const& t) : 
                     P::net(t), 
-                    m_send(TIME_MAX),
+                    m_send_schedule(get_generator(has_randomizer<P>{}, *this), t),
+                    m_recv_schedule(get_generator(has_randomizer<P>{}, *this), t),
                     m_threads(common::get_or<tags::threads>(t, FCPP_THREADS)),
                     m_MPI_procs_count(common::get<tags::mpi_procs>(t)),
                     node_splitter(get_generator(has_randomizer<P>{}, *this), t){}
@@ -433,9 +439,14 @@ struct graph_connector {
                         std::cout << "No messages exchanged" << std::endl;
                     else {
                         std::cout << "Messages have been exchanged" << std::endl;
-                        for (std::pair<const int, std::unordered_map<device_t, std::tuple<times_t, typename F::node::message_t, device_t>>> messages_map : m_communication_maps){
-                            for (std::pair<const device_t, std::tuple<times_t, typename F::node::message_t, device_t>> msg : messages_map.second){
-                                std::cout << "Message sent to node: " + std::to_string(msg.first) + " On process: " + std::to_string(messages_map.first) + " at time: " + std::to_string(std::get<0>(msg.second)) << std::endl;
+                        for (std::pair<const int, mpi_node_message_type> process_messages : m_communication_maps){
+                            for (std::pair<const device_t, node_message_type> node_messages : process_messages.second){
+                                for (std::pair<const device_t, std::pair<times_t, typename F::node::message_t>> msg : node_messages.second){
+                                    std::cout << "Message sent to process: " + std::to_string(process_messages.first) 
+                                    + " to the node " + std::to_string(node_messages.first) 
+                                    + " from the node " + std::to_string(msg.first) 
+                                    + " at time: " + std::to_string(msg.second.first) << std::endl;
+                                }
                             }
                         }
                     }
@@ -453,19 +464,23 @@ struct graph_connector {
 
                 void add_to_map(int rank, device_t receiver_uid, times_t timestamp, typename F::node::message_t msg, device_t sender_uid){
                     common::lock_guard<parallel> l(comm_map_mutex);
-                    m_communication_maps[rank][receiver_uid] = std::make_tuple(timestamp, msg, sender_uid);
+                    m_communication_maps[rank][receiver_uid][sender_uid] = std::make_pair(timestamp, msg);
                 }
 
                 //! @brief Updates the internal status of net component.
                 void update() {
-                    //std::cout << "Net updated launched" << std::endl;
-                    times_t t = m_send;
+                    std::cout << "Net updated launched" << std::endl;
+                    times_t t_send = m_send_schedule.next();
+                    times_t t_recv = m_recv_schedule.next();
                     times_t pt = P::net::next();
                     // verifico quale evento di update vada eseguito prima
                     // tra il mio e quello del padre
-                    //std::cout << "t: " << t << std::endl;
-                    //std::cout << "pt: " << pt << std::endl;
-                    if (t < pt) {
+                    std::cout << "t_send: " << t_send << std::endl;
+                    std::cout << "t_recv: " << t_recv << std::endl;
+                    std::cout << "pt: " << pt << std::endl;
+
+
+                    if (t_send < pt) {
                         /*
                             1) Individuare lista messaggi da inviare
                             2) capire come funzioni l'invio
@@ -491,39 +506,40 @@ struct graph_connector {
                         // TODO: ha senso? Cosa fa?
                         PROFILE_COUNT("graph_connector");
                         PROFILE_COUNT("graph_connector/send");
-
+                        m_send_schedule.step();
                         // sending messages to remote nodes
                         common::osstream os;
                         int snd_buffer_size = 0;
-                        //std::cout << "Scanning remote messages..." << std::endl;
-                        for (std::pair<const int, std::unordered_map<device_t, std::tuple<times_t, typename F::node::message_t, device_t>>> messages_map : m_communication_maps){
-                            //std::cout << "Sending remote message to process: " << messages_map.first << std::endl;
-                            os << messages_map.second;
+                        std::cout << "Scanning remote messages..." << std::endl;
+
+                        for (std::pair<const int, mpi_node_message_type> process_messages : m_communication_maps){
+                            std::cout << "Sending remote message to process: " << process_messages.first << std::endl;
+                            os << process_messages.second;
                             snd_buffer_size = os.size();
                             std::vector<char> m_data = std::move(os.data());
                             // 0 for a size message, 1 for a data message
-                            MPI_Send(&snd_buffer_size, 1, MPI_INT, messages_map.first, 0, MPI_COMM_WORLD);
+                            MPI_Send(&snd_buffer_size, 1, MPI_INT, process_messages.first, 0, MPI_COMM_WORLD);
                             // move dovrebbe evitare di fare una copia dei dati, operazione molto costosa
-                            MPI_Send(&m_data[0], snd_buffer_size, MPI_CHAR, messages_map.first, 1, MPI_COMM_WORLD);
+                            MPI_Send(m_data.data(), snd_buffer_size, MPI_CHAR, process_messages.first, 1, MPI_COMM_WORLD);
                         }
-                        //std::cout << "Remote messages scanning completed" << std::endl;
-
+                        std::cout << "Messages to be sent scanned" << std::endl;
+                    } else if (t_recv < pt){
                         // receiving messages from remote node using MPI_receive
                         int rcv_buffer_size;
                         // Ha senso fare una receive sola, contando che potrebbero essersi accumulati
                         // i dati provenienti da tanti processi MPI diversi??
                         // non bisognerebbe fare un polling di tutti i processi MPI??
                         int messageExists = 0;
-                        //std::cout << "Looking for messages from MPI processes..." << std::endl;
+                        std::cout << "Looking for messages from MPI processes..." << std::endl;
                         for (int rank = 0; rank < m_MPI_procs_count - 1; rank++){
                             messageExists = 0;
-                            //std::cout << "Checking remote message from process: " << rank << std::endl;
+                            std::cout << "Checking remote message from process: " << rank << std::endl;
                             rcv_buffer_size = 0;
                             // TODO: rendere non bloccante qualora non ci siano messaggi dal
                             // processo di rango rank
                             MPI_Iprobe(rank, 0, MPI_COMM_WORLD, &messageExists, MPI_STATUS_IGNORE);
                             if (messageExists){
-                               // std::cout << "Receiving remote message from process: " << rank << std::endl;
+                                std::cout << "Receiving remote message from process: " << rank << std::endl;
                                 MPI_Recv(&rcv_buffer_size, 1, MPI_INT, rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                                 // TODO: si può rendere più efficiente evitando di riallocare ogni volta?
                                 std::vector<char>rcv_buffer(rcv_buffer_size);
@@ -532,75 +548,28 @@ struct graph_connector {
                                 MPI_Recv(&rcv_buffer[0], rcv_buffer_size, MPI_CHAR, rank, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                                 //common::isstream is(std::move(rcv_buffer));
                                 common::isstream is(std::move(rcv_buffer));
-                                std::unordered_map<device_t, std::tuple<times_t, typename F::node::message_t, device_t>> incoming_msg_map;
+                                mpi_node_message_type incoming_msg_map;
                                 is >> incoming_msg_map;
 
                                 // ora scansiono la mappa, smistando i messaggi ai destinatari
-                                for (std::pair<const device_t, std::tuple<times_t, typename F::node::message_t, device_t>> msg : incoming_msg_map){
-                                    //std::cout << "Sending message to local node " << msg.first << std::endl;
+                                // id ricevitore
+                                for (std::pair<const device_t, node_message_type> node_messages : incoming_msg_map){
+                                    std::cout << "Sending message to local node " << node_messages.first << std::endl;
                                     // recupero il puntatore a nodo
-                                    typename F::node* n = const_cast<typename F::node*>(&P::net::node_at(msg.first));
-                                    // e lo uso per richiamare la receive
+                                    typename F::node* n = const_cast<typename F::node*>(&P::net::node_at(node_messages.first));
                                     common::lock_guard<parallel> l(n->mutex);
-                                    n->receive(std::get<0>(msg.second), std::get<2>(msg.second), std::get<1>(msg.second));
+                                    // id mittente
+                                    for (std::pair<const device_t, std::pair<times_t, typename F::node::message_t>> msg : node_messages.second){
+                                        n->receive(msg.second.first, msg.first, msg.second.second);
+                                    }
                                 }
                             } else {
-                                //std::cout << "No message coming from process of rank: " << rank << std::endl;
+                                std::cout << "No message coming from process of rank: " << rank << std::endl;
                             }
                         }
-                        //std::cout << "Check completed" << std::endl;
-                    } 
-                        else P::net::update();
-                }
-
-                //! @brief Performs computations at round start with current time `t`.
-                void round_start(times_t t) {
-                    m_send = t + m_delay(get_generator(has_randomizer<P>{}, *this), common::tagged_tuple_t<>{});
-                    P::node::round_start(t);
-                }
-
-                /**
-                * @brief Returns next event to schedule for the node component.
-                *
-                * Should correspond to the next time also during updates.
-                */
-                times_t next() const {
-                    return std::min(m_send, P::net::next());
-                }
-
-                //! @brief Returns the time of the next sending of messages.
-                times_t send_time() const {
-                    return m_send;
-                }
-
-                //! @brief Plans the time of the next sending of messages (`TIME_MAX` to prevent sending).
-                void send_time(times_t t) {
-                    m_send = t;
-                }
-
-                //! @brief Disable the next sending of messages (shorthand to `send_time(TIME_MAX)`).
-                void disable_send() {
-                    m_send = TIME_MAX;
-                }
-
-                //! @brief The number of threads to be used.
-                size_t const m_threads;
-
-                //! @brief Map that stores messages to be sent to remote nodes, located on another process
-                std::unordered_map<int, std::unordered_map<device_t, std::tuple<times_t, typename F::node::message_t, device_t>>> m_communication_maps;
-
-                //! @brief Number of MPI processes
-                int m_MPI_procs_count;
-
-                //! @brief Functor to compute the MPI process associated to a node
-                node_splitting_type node_splitter;
-
-                //! @brief Mutex to manage parallel access to messages map
-                common::mutex<parallel> comm_map_mutex;
-
-                //! @brief Time of the next send-message event.
-                times_t m_send;
-
+                    } else
+                        P::net::update();
+                }             
             private: // implementation details
                 //! @brief Returns the `randomizer` generator if available.
                 template <typename N>
@@ -619,6 +588,33 @@ struct graph_connector {
                 inline void maybe_clear(std::true_type, N& n) {
                     return n.node_clear();
                 }
+
+                //! @brief Object that dictates the sequence of sending events
+                mpi_send_schedule_type m_send_schedule;
+
+                //! @brief Object that dictates the sequence of receiving events
+                mpi_recv_schedule_type m_recv_schedule;
+
+                //! @brief The number of threads to be used.
+                size_t const m_threads;
+
+                //! @brief map that associates the sender to the messages sent
+                using node_message_type = std::unordered_map<device_t, std::pair<times_t, typename F::node::message_t>>;
+
+                //! @brief map that associates the receiver to the messages received
+                using mpi_node_message_type = std::unordered_map<device_t, node_message_type>;
+
+                //! @brief map that associates the MPI process to the messages addressed to node on it
+                std::unordered_map<int, mpi_node_message_type> m_communication_maps;
+
+                //! @brief Number of MPI processes
+                int m_MPI_procs_count;
+
+                //! @brief Functor to compute the MPI process associated to a node
+                node_splitting_type node_splitter;
+
+                //! @brief Mutex to manage parallel access to messages map
+                common::mutex<parallel> comm_map_mutex;
         };
     };
 };
